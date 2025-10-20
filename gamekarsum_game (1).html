@@ -1,0 +1,326 @@
+<!-- KARSUM COIN - JUMP GAME (Playable)
+     Cara pakai: Simpan sebagai karsum_jump_game.html lalu buka di browser.
+     Versi ini memperbaiki potongan kode yang hilang dan membuat game bisa dimainkan langsung.
+-->
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>KARSUM COIN - Jump Game (Playable)</title>
+<style>
+  :root{--bg:#e9f6ff;--ground:#222;--accent:#0a74da;--coin:#f5c542}
+  html,body{height:100%;margin:0;font-family:monospace;background:var(--bg);display:flex;align-items:center;justify-content:center}
+  #gameWrap{width:900px;max-width:98%;}
+  canvas{display:block;background:linear-gradient(#cfe9ff,#f7f7f7);border:6px solid #000;image-rendering:pixelated;width:100%;height:auto}
+  .hud{display:flex;justify-content:space-between;padding:8px 4px;gap:8px}
+  .badge{background:#111;color:#fff;padding:6px 8px;border-radius:6px;font-weight:700}
+  .controls{text-align:center;margin-top:6px;font-size:13px}
+  .panel{display:flex;gap:8px;align-items:center;margin-top:8px}
+  .btn{background:#0a74da;color:#fff;padding:6px 10px;border-radius:6px;border:none;cursor:pointer}
+  .small{padding:4px 8px;font-size:13px}
+  .muted{font-size:12px;color:#444}
+  .leaderboard{background:#fff;border:1px solid #ccc;padding:6px;border-radius:6px;font-size:13px}
+  @media (max-width:600px){.hud{flex-direction:column;align-items:stretch}}
+</style>
+</head>
+<body>
+  <div id="gameWrap">
+    <div class="hud">
+      <div>
+        <div class="badge">KARSUM COIN - JUMP GAME</div>
+        <div class="muted">Skin: <select id="skinSelect"><option value="kasman">Kasman (pixel)</option><option value="e46">E46 (car)</option></select></div>
+      </div>
+      <div class="badge">Score: <span id="score">0</span> • Best: <span id="best">0</span></div>
+    </div>
+    <canvas id="c" width="900" height="240" role="application" aria-label="Karsum Jump Game"></canvas>
+
+    <div class="controls">Tekan <strong>Space</strong> atau <strong>klik/touch</strong> untuk lompat • Kumpulkan koin KARSUM untuk skor tambahan</div>
+
+    <div class="panel">
+      <button id="toggleMusic" class="btn small">Sound: ON</button>
+      <button id="showLeaderboard" class="btn small">Leaderboard (Local)</button>
+      <div class="leaderboard" id="leaderboardBox" style="display:none;width:220px">Top 5:<ol id="lbList"></ol></div>
+      <div style="margin-left:auto" class="muted">Web3: <button id="connectWallet" class="small">Connect Wallet</button> <button id="claimBtn" class="small">Claim (placeholder)</button></div>
+    </div>
+
+    <div class="muted" style="margin-top:6px">Created for KARSUM token — Enhanced features: sprite animation, leaderboard, sounds, Web3 scaffold.</div>
+
+  </div>
+
+<script>
+(() => {
+  // Canvas & context
+  const canvas = document.getElementById('c'); const ctx = canvas.getContext('2d');
+  const W = canvas.width, H = canvas.height;
+  const groundY = H - 40;
+
+  // HUD
+  const scoreEl = document.getElementById('score'); const bestEl = document.getElementById('best');
+  const lbBtn = document.getElementById('showLeaderboard'); const lbBox = document.getElementById('leaderboardBox'); const lbList = document.getElementById('lbList');
+  const skinSelect = document.getElementById('skinSelect');
+
+  // Game state
+  let frame = 0, score = 0, speed = 4, gameOver = false, best = 0, audioOn = true;
+  let obstacles = [], coins = [];
+
+  // Player with animation frames
+  const player = { x:80, y: groundY, w:28, h:36, vy:0, onGround:true, animFrame:0, animTick:0, skin:'kasman' };
+
+  // Load best from localStorage
+  function loadBest(){ try{ const b = parseInt(localStorage.getItem('karsum_best')||'0'); best = isNaN(b)?0:b; bestEl.textContent = best; }catch(e){} } loadBest();
+
+  // Leaderboard (top5) in localStorage
+  function getLeaderboard(){ try{ return JSON.parse(localStorage.getItem('karsum_lb')||'[]'); }catch(e){return[]} }
+  function saveLeaderboard(lb){ localStorage.setItem('karsum_lb', JSON.stringify(lb)); }
+  function addToLeaderboard(name, s){ const lb = getLeaderboard(); lb.push({name: name || 'Anon', score: s}); lb.sort((a,b)=>b.score-a.score); if (lb.length>5) lb.length=5; saveLeaderboard(lb); }
+  function renderLeaderboard(){ const lb = getLeaderboard(); lbList.innerHTML = ''; if (lb.length===0) lbList.innerHTML='<li>(kosong)</li>'; else lb.forEach(e=>{ const li = document.createElement('li'); li.textContent = `${e.name} — ${e.score}`; lbList.appendChild(li); }); }
+
+  // Sounds using Web Audio
+  let audioCtx = null;
+  function ensureAudio(){ if (!audioCtx) audioCtx = new (window.AudioContext||window.webkitAudioContext)(); }
+  function sfx(type){
+    if (!audioOn) return;
+    try{
+      ensureAudio();
+      const t = audioCtx.currentTime;
+      const o = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      o.connect(g); g.connect(audioCtx.destination);
+      let freq = 440, dur = 0.12, typeWave = 'sine';
+      if (type === 'jump'){ freq = 700; typeWave='sawtooth'; }
+      else if (type === 'score'){ freq = 1100; typeWave='square'; dur = 0.08; }
+      else if (type === 'coin'){ freq = 900; typeWave='triangle'; dur = 0.12; }
+      else if (type === 'hit'){ freq = 240; typeWave='sine'; dur = 0.3; }
+      o.type = typeWave; o.frequency.setValueAtTime(freq, t);
+      g.gain.setValueAtTime(0.0001, t);
+      g.gain.exponentialRampToValueAtTime(0.12, t+0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, t+dur);
+      o.start(t); o.stop(t+dur+0.02);
+    }catch(e){}
+  }
+
+  // Drawing helper: rounded rect
+  function roundRect(x,y,w,h,r){
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.lineTo(x + w - r, y);
+    ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+    ctx.lineTo(x + w, y + h - r);
+    ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+    ctx.lineTo(x + r, y + h);
+    ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+    ctx.lineTo(x, y + r);
+    ctx.quadraticCurveTo(x, y, x + r, y);
+    ctx.closePath();
+    ctx.fill();
+  }
+
+  // Spawn functions
+  function spawnObstacle(){ const h = 20 + Math.random()*40; obstacles.push({x: W+10, y: groundY - h, w: 18 + Math.random()*18, h: h, passed:false}); }
+  function spawnCoin(){ const cy = groundY - 30 - Math.random()*80; coins.push({x: W+20, y: cy, r:10, collected:false}); }
+
+  // Reset
+  function reset(){ obstacles=[]; coins=[]; frame=0; score=0; speed=4; gameOver=false; player.y=groundY; player.vy=0; player.onGround=true; player.animFrame=0; scoreEl.textContent=score; }
+
+  // Update
+  function update(){
+    if (gameOver) return;
+    frame++;
+    // spawn logic (frame-based)
+    if (frame % Math.floor(90 + Math.random()*80) === 0) spawnObstacle();
+    if (frame % 200 === 0) spawnCoin();
+    if (frame % 300 === 0) speed += 0.3;
+
+    // gravity & movement
+    player.vy += 0.9;
+    player.y += player.vy;
+    if (player.y > groundY){ player.y = groundY; player.vy = 0; player.onGround = true; }
+
+    // move obstacles
+    for (let i = obstacles.length - 1; i >= 0; i--){
+      const o = obstacles[i];
+      o.x -= speed;
+      // passed scoring
+      if (!o.passed && o.x + o.w < player.x){
+        o.passed = true;
+        score += 10;
+        scoreEl.textContent = score;
+        sfx('score');
+      }
+      // collision with player
+      if (rectIntersect(player.x, player.y - player.h, player.w, player.h, o.x, o.y, o.w, o.h)){
+        gameOver = true;
+        sfx('hit');
+        // update best and prompt to save to leaderboard later on restart
+        if (score > best){ best = score; localStorage.setItem('karsum_best', best); bestEl.textContent = best; }
+      }
+      // remove off-screen obstacles
+      if (o.x + o.w < -50) obstacles.splice(i,1);
+    }
+
+    // move coins
+    for (let i = coins.length - 1; i >= 0; i--){
+      const c = coins[i];
+      c.x -= speed;
+      if (!c.collected && circleRectIntersect(c.x, c.y, c.r, player.x, player.y - player.h, player.w, player.h)){
+        c.collected = true;
+        score += 25;
+        scoreEl.textContent = score;
+        sfx('coin');
+        // keep coin a moment then remove
+        setTimeout(()=> {
+          const idx = coins.indexOf(c);
+          if (idx !== -1) coins.splice(idx,1);
+        }, 200);
+      } else if (c.x < -50) {
+        coins.splice(i,1);
+      }
+    }
+
+    // animation tick
+    player.animTick++; if (player.animTick % 6 === 0) player.animFrame = (player.animFrame+1) % 4;
+  }
+
+  // Draw
+  function draw(){
+    ctx.clearRect(0,0,W,H);
+    // background gradient
+    const g = ctx.createLinearGradient(0,0,0,H); g.addColorStop(0,'#cfe9ff'); g.addColorStop(1,'#f7f7f7'); ctx.fillStyle = g; ctx.fillRect(0,0,W,H);
+    // ground
+    ctx.fillStyle = '#222'; ctx.fillRect(0,groundY,W,H-groundY);
+
+    // draw player depending on skin
+    if (player.skin === 'kasman') drawKasman(); else drawE46();
+
+    // obstacles
+    ctx.fillStyle = '#b33';
+    obstacles.forEach(o=>{ ctx.save(); ctx.fillStyle = '#b33'; roundRect(Math.round(o.x), Math.round(o.y), Math.round(o.w), Math.round(o.h),4); ctx.restore(); });
+
+    // coins
+    coins.forEach(c=>{
+      if (!c.collected){
+        ctx.beginPath();
+        ctx.fillStyle = 'var(--coin)';
+        ctx.arc(Math.round(c.x), Math.round(c.y), c.r,0,Math.PI*2);
+        ctx.fill();
+        // coin shine
+        ctx.fillStyle = '#fff';
+        ctx.font = '12px monospace'; ctx.textAlign='center';
+        ctx.fillText('K', Math.round(c.x), Math.round(c.y)+4);
+      }
+    });
+
+    // simple HUD hints
+    ctx.fillStyle='#000'; ctx.font='12px monospace'; ctx.textAlign='left'; ctx.fillText('Frame: '+frame, 10, 16);
+  }
+
+  // Draw Kasman pixel character
+  function drawKasman(){
+    const px = player.x, py = player.y - player.h;
+    // shadow
+    ctx.fillStyle='rgba(0,0,0,0.15)'; ctx.fillRect(px+2, player.y+2, player.w, 6);
+    // body
+    ctx.fillStyle = '#0a74da'; ctx.fillRect(px, py, player.w, player.h);
+    // feet
+    ctx.fillStyle = '#073a6a'; ctx.fillRect(px+4, py+player.h-8, 6,6); ctx.fillRect(px+18, py+player.h-8,6,6);
+    // eyes vary per animFrame
+    ctx.fillStyle='#fff'; ctx.fillRect(px+6, py+8,4,4); ctx.fillRect(px+18, py+8,4,4);
+    ctx.fillStyle='#000';
+    if (player.animFrame % 2 === 0){ ctx.fillRect(px+7, py+9,2,2); ctx.fillRect(px+19, py+9,2,2); }
+    else { ctx.fillRect(px+7, py+10,2,2); ctx.fillRect(px+19, py+10,2,2); }
+  }
+
+  // Draw E46 car skin
+  function drawE46(){
+    const px = player.x, py = player.y - (player.h*0.6);
+    // shadow
+    ctx.fillStyle='rgba(0,0,0,0.18)'; ctx.fillRect(px+4, player.y+6, player.w+8, 6);
+    // body
+    ctx.fillStyle='#888'; ctx.save(); ctx.beginPath(); roundRect(px-6, py+8, player.w+20, player.h-18,6); ctx.restore();
+    // roof
+    ctx.fillStyle='#555'; ctx.save(); ctx.beginPath(); roundRect(px+6, py, player.w-4, player.h-22,4); ctx.restore();
+    // wheels
+    ctx.fillStyle='#111'; ctx.beginPath(); ctx.arc(px+8, py+player.h-6,6,0,Math.PI*2); ctx.fill(); ctx.beginPath(); ctx.arc(px+player.w+6, py+player.h-6,6,0,Math.PI*2); ctx.fill();
+  }
+
+  function loop(){ update(); draw(); if (gameOver){ showGameOver(); } else requestAnimationFrame(loop); }
+
+  function showGameOver(){
+    ctx.fillStyle='rgba(0,0,0,0.6)'; ctx.fillRect(0,0,W,H);
+    ctx.fillStyle='#fff'; ctx.textAlign='center'; ctx.font='24px monospace'; ctx.fillText('GAME OVER', W/2, H/2 - 10);
+    ctx.font='14px monospace'; ctx.fillText('Klik/Space untuk main lagi', W/2, H/2 + 18);
+    // also show final score
+    ctx.font='16px monospace'; ctx.fillText('Score: ' + score, W/2, H/2 + 44);
+  }
+
+  // collisions
+  function rectIntersect(x1,y1,w1,h1,x2,y2,w2,h2){
+    return !(x2 > x1 + w1 || x2 + w2 < x1 || y2 > y1 + h1 || y2 + h2 < y1);
+  }
+  function circleRectIntersect(cx,cy,r, rx,ry,rw,rh){
+    const closestX = clamp(cx, rx, rx+rw);
+    const closestY = clamp(cy, ry, ry+rh);
+    const dx = cx - closestX;
+    const dy = cy - closestY;
+    return (dx*dx + dy*dy) <= (r*r);
+  }
+  function clamp(v,a,b){ return Math.max(a, Math.min(b, v)); }
+
+  // input
+  function jump(){
+    if (!gameOver && player.onGround){
+      player.vy = -14; player.onGround = false; sfx('jump');
+    } else if (gameOver){
+      // on restart: ask name if score > 0, add to leaderboard if desired, then reset
+      if (score > 0){
+        const name = prompt('Masukkan nama untuk leaderboard (kosong = Anon):', '');
+        if (name !== null) addToLeaderboard(name || 'Anon', score);
+        renderLeaderboard();
+      }
+      reset(); loop();
+    }
+  }
+  window.addEventListener('keydown', e=>{ if (e.code==='Space' || e.code==='ArrowUp'){ e.preventDefault(); jump(); } });
+  canvas.addEventListener('click', ()=>{ jump(); });
+  canvas.addEventListener('touchstart', (e)=>{ e.preventDefault(); jump(); }, {passive:false});
+
+  // UI bindings
+  document.getElementById('toggleMusic').addEventListener('click', ()=>{
+    audioOn = !audioOn;
+    document.getElementById('toggleMusic').textContent = audioOn ? 'Sound: ON' : 'Sound: OFF';
+  });
+  lbBtn.addEventListener('click', ()=>{ lbBox.style.display = lbBox.style.display==='none' ? 'block' : 'none'; renderLeaderboard(); });
+  skinSelect.addEventListener('change', ()=>{ player.skin = skinSelect.value; });
+
+  // Basic Web3 scaffold (connect wallet + placeholder claim). This does NOT send transactions by default.
+  const connectBtn = document.getElementById('connectWallet'); const claimBtn = document.getElementById('claimBtn');
+  async function connectWallet(){
+    if (window.ethereum){
+      try{
+        await window.ethereum.request({ method: 'eth_requestAccounts' });
+        connectBtn.textContent = 'Connected';
+        const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+        console.log('accounts', accounts);
+      }catch(e){ alert('Wallet connection rejected or error'); }
+    } else {
+      alert('No injected Ethereum provider detected (MetaMask).');
+    }
+  }
+  connectBtn.addEventListener('click', connectWallet);
+  claimBtn.addEventListener('click', async ()=>{
+    if (!window.ethereum){ alert('Connect wallet first'); return; }
+    try{
+      const accounts = await window.ethereum.request({ method: 'eth_accounts' });
+      if (!accounts || accounts.length===0){ alert('Please connect wallet first'); return; }
+      alert('Claim placeholder — implement smart contract interaction to give tokens.');
+    }catch(e){ alert('Error contacting wallet'); }
+  });
+
+  // Start
+  reset(); renderLeaderboard(); loop();
+
+})();
+</script>
+</body>
+</html>
