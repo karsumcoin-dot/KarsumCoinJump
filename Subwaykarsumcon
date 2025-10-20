@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="id">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1" />
+  <title>Subway-like Runner + Solana (Phantom) Karsum</title>
+  <style>
+    html,body { height:100%; margin:0; background:#111; color:#fff; font-family:Arial,Helvetica,sans-serif }
+    #game-container { width:100%; height:100vh; display:flex; align-items:center; justify-content:center }
+    .ui { position: absolute; z-index: 12; left: 12px; top: 12px; font-size:16px }
+    .topbar { display:flex; gap:8px; align-items:center }
+    .controls { position: absolute; right: 12px; bottom: 12px; z-index: 10; display:flex; gap:6px }
+    .btn { background: rgba(255,255,255,0.12); padding:10px 12px; border-radius:8px; backdrop-filter: blur(4px); user-select:none; cursor:pointer }
+    .hint { position: absolute; left:50%; transform:translateX(-50%); bottom: 18px; z-index:10; font-size:14px; opacity:0.9 }
+    #leaderboard { position:absolute; right:12px; top:12px; background:rgba(0,0,0,0.4); padding:10px; border-radius:8px; width:340px; max-height:80vh; overflow:auto; z-index:11 }
+    input[type=text], input[type=number], select{width:100%; padding:6px; border-radius:6px; border:none; margin-top:6px}
+    .small{font-size:12px; opacity:0.9}
+  </style>
+  <!-- Phaser 3 -->
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+  <!-- Solana web3 + spl-token (IIFE builds) -->
+  <script src="https://cdn.jsdelivr.net/npm/@solana/web3.js@1.73.0/lib/index.iife.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@solana/spl-token@0.3.7/lib/index.iife.min.js"></script>
+</head>
+<body>
+  <div id="game-container"></div>
+
+  <div class="ui topbar">
+    <div id="scoreUI">Score: 0</div>
+    <div style="width:12px"></div>
+    <div class="btn" id="connectBtn">Connect Phantom</div>
+    <div id="accountInfo" class="small" style="margin-left:8px"></div>
+  </div>
+
+  <div id="leaderboard">
+    <strong>Leaderboard</strong>
+    <div class="small">Players (local storage). Connect with Phantom to register address.</div>
+
+    <div style="height:8px"></div>
+    <label>Karsum (SPL) mint address</label>
+    <input id="tokenMint" type="text" placeholder="Eg. Enter token mint address" />
+
+    <label>Decimals (eg. 9)</label>
+    <input id="tokenDecimals" type="number" placeholder="Token decimals" />
+
+    <label>Tokens per point (eg. 0.01)</label>
+    <input id="tokensPerPoint" type="number" step="any" placeholder="Tokens per point" />
+
+    <div style="height:8px"></div>
+    <div id="boardList"></div>
+    <div style="height:8px"></div>
+    <div class="small">Important: Developer must connect Phantom (or another wallet exposing window.solana) that holds token & SOL for fees. This UI crafts and sends SPL token transfers via Phantom's signAndSendTransaction.</div>
+  </div>
+
+  <div class="controls">
+    <div class="btn" id="leftBtn">◀</div>
+    <div class="btn" id="upBtn">▲</div>
+    <div class="btn" id="rightBtn">▶</div>
+  </div>
+  <div class="hint">Swipe left/right to change lane — Swipe up to jump</div>
+
+<script>
+// --------------------------------------------------
+// Game + Solana (Phantom) integration for SPL token "Karsum"
+// - Uses window.solana (Phantom) if available
+// - Leaderboard is localStorage (for now)
+// - Developer can send SPL tokens (from connected Phantom) to a player's associated token account
+// --------------------------------------------------
+
+const SOLANA_NETWORK_RPC = 'https://api.mainnet-beta.solana.com'; // change to testnet or devnet if you prefer
+let connection;
+let phantomConnected = false;
+let walletPubkey = null;
+
+// helper
+function shortAddr(a){ if(!a) return ''; return a.slice(0,6)+"..."+a.slice(-4); }
+
+async function initSolana(){
+  connection = new solanaWeb3.Connection(SOLANA_NETWORK_RPC, 'confirmed');
+  // detect Phantom
+  if (window.solana && window.solana.isPhantom){
+    console.log('Phantom detected');
+  } else {
+    console.warn('Wallet (Phantom) not found. Some features require Phantom.');
+  }
+}
+
+async function connectPhantom(){
+  if (!window.solana){ alert('Phantom tidak ditemukan di browser. Pasang Phantom atau wallet yang kompatibel.'); return false; }
+  try{
+    const res = await window.solana.connect();
+    walletPubkey = res.publicKey;
+    phantomConnected = true;
+    document.getElementById('accountInfo').innerText = shortAddr(walletPubkey.toString());
+    return true;
+  }catch(err){ console.error('connect phantom err', err); return false; }
+}
+
+async function disconnectPhantom(){
+  if (window.solana && window.solana.disconnect) await window.solana.disconnect();
+  phantomConnected = false; walletPubkey = null; document.getElementById('accountInfo').innerText = '';
+}
+
+// ---------------- Game (Phaser) ----------------
+const config = {
+  type: Phaser.AUTO,
+  parent: 'game-container',
+  width: Math.min(window.innerWidth, 800),
+  height: Math.min(window.innerHeight, 1280) * 0.8,
+  scale: { mode: Phaser.Scale.FIT, autoCenter: Phaser.Scale.CENTER_BOTH },
+  backgroundColor: '#1e1e2f',
+  physics: { default: 'arcade', arcade: { gravity: { y: 1200 }, debug: false } },
+  scene: { preload, create, update }
+};
+
+const game = new Phaser.Game(config);
+
+function preload(){}
+
+function create(){
+  const scene = this;
+  scene.laneX = [config.width*0.25, config.width*0.5, config.width*0.75];
+  scene.laneY = config.height*0.75;
+  scene.currentLane = 1;
+  scene.speed = 350;
+  scene.score = 0;
+
+  scene.add.rectangle(config.width/2, scene.laneY + 70, config.width, 200, 0x222233);
+  scene.player = scene.add.circle(scene.laneX[scene.currentLane], scene.laneY, 28, 0xffcc00);
+  scene.physics.add.existing(scene.player);
+  scene.player.body.setCircle(28);
+  scene.player.body.setCollideWorldBounds(true);
+  scene.player.body.setAllowGravity(true);
+  scene.player.body.setImmovable(true);
+
+  scene.obstacles = scene.physics.add.group();
+  scene.coins = scene.physics.add.group();
+
+  scene.physics.add.overlap(scene.player, scene.coins, collectCoin, null, scene);
+  scene.physics.add.collider(scene.player, scene.obstacles, hitObstacle, null, scene);
+
+  scene.coinTimer = scene.time.addEvent({ delay: 600, callback: spawnCoinWave, callbackScope: scene, loop: true });
+  scene.obTimer = scene.time.addEvent({ delay: 900, callback: spawnObstacle, callbackScope: scene, loop: true });
+
+  scene.cursors = scene.input.keyboard.createCursorKeys();
+  scene.input.on('pointerdown', onDown, scene);
+  scene.input.on('pointerup', onUp, scene);
+  scene.startPointer = null;
+
+  document.getElementById('leftBtn').addEventListener('click', () => changeLane(scene, -1));
+  document.getElementById('rightBtn').addEventListener('click', () => changeLane(scene, 1));
+  document.getElementById('upBtn').addEventListener('click', () => jump(scene));
+
+  updateScoreUI(scene);
+}
+
+function update(time, delta){
+  const scene = this;
+  if (Phaser.Input.Keyboard.JustDown(scene.cursors.left)) changeLane(scene, -1);
+  if (Phaser.Input.Keyboard.JustDown(scene.cursors.right)) changeLane(scene, 1);
+  if (Phaser.Input.Keyboard.JustDown(scene.cursors.up)) jump(scene);
+
+  Phaser.Actions.IncY(scene.obstacles.getChildren(), scene.speed * (delta/1000));
+  Phaser.Actions.IncY(scene.coins.getChildren(), scene.speed * (delta/1000));
+
+  scene.obstacles.getChildren().forEach(o => { if (o.y > config.height + 100) o.destroy(); });
+  scene.coins.getChildren().forEach(c => { if (c.y > config.height + 100) c.destroy(); });
+
+  const targetX = scene.laneX[scene.currentLane];
+  scene.player.x = Phaser.Math.Linear(scene.player.x, targetX, 0.25);
+}
+
+function changeLane(scene, dir) { scene.currentLane = Phaser.Math.Clamp(scene.currentLane + dir, 0, 2); }
+function jump(scene) { if (scene.player.body.touching.down || Math.abs(scene.player.body.velocity.y) < 50) { scene.player.body.setVelocityY(-600); } }
+
+function spawnCoinWave(){
+  const scene = this;
+  const pattern = Phaser.Math.Between(1,3);
+  const yStart = -40;
+  for (let i=0;i<pattern;i++){
+    const lane = Phaser.Math.Between(0,2);
+    const x = scene.laneX[lane];
+    const coin = scene.add.circle(x, yStart - i*40, 12, 0x00e5ff);
+    coin.setData('value', 1);
+    scene.physics.add.existing(coin);
+    coin.body.setImmovable(true);
+    coin.body.setAllowGravity(false);
+    scene.coins.add(coin);
+  }
+}
+
+function spawnObstacle(){
+  const scene = this;
+  const lane = Phaser.Math.Between(0,2);
+  const x = scene.laneX[lane];
+  const y = -40;
+  const obs = scene.add.rectangle(x, y, 60, 60, 0xff4444);
+  scene.physics.add.existing(obs);
+  obs.body.setImmovable(true);
+  obs.body.setAllowGravity(false);
+  scene.obstacles.add(obs);
+}
+
+function collectCoin(player, coin){
+  const scene = this;
+  coin.destroy();
+  scene.score += coin.getData('value') || 1;
+  updateScoreUI(scene);
+  const pop = scene.add.circle(player.x, player.y - 40, 6, 0xffff66);
+  scene.tweens.add({ targets: pop, y: pop.y - 20, alpha:0, scale:1.6, duration:300, onComplete:()=>pop.destroy() });
+}
+
+function hitObstacle(player, obs){
+  const scene = this;
+  scene.scene.pause();
+  const txt = scene.add.text(config.width/2, config.height/2 - 20, 'Game Over', { font:'36px Arial', fill:'#ffdddd' }).setOrigin(0.5);
+  const scoreTxt = scene.add.text(config.width/2, config.height/2 + 20, `Score: ${scene.score}`, { font:'20px Arial', fill:'#fff' }).setOrigin(0.5);
+  const restart = scene.add.text(config.width/2, config.height/2 + 70, 'Tap to Restart', { font:'18px Arial', fill:'#88f' }).setOrigin(0.5).setInteractive();
+  restart.on('pointerdown', ()=> location.reload());
+
+  if (walletPubkey) saveToLeaderboard(walletPubkey.toString(), scene.score);
+  renderLeaderboard();
+}
+
+function updateScoreUI(scene){ document.getElementById('scoreUI').innerText = `Score: ${scene.score}`; }
+
+function onDown(pointer) { this.startPointer = pointer; }
+function onUp(pointer){
+  if (!this.startPointer) return;
+  const dx = pointer.upX - this.startPointer.downX;
+  const dy = pointer.upY - this.startPointer.downY;
+  const adx = Math.abs(dx), ady = Math.abs(dy);
+  const thresh = 30;
+  if (adx > ady && adx > thresh) { if (dx > 0) changeLane(this, 1); else changeLane(this, -1); }
+  else if (ady > adx && ady > thresh) { if (dy < 0) jump(this); }
+  else { jump(this); }
+  this.startPointer = null;
+}
+
+window.addEventListener('resize', ()=>{ game.scale.resize(Math.min(window.innerWidth, 800), Math.min(window.innerHeight, 1280) * 0.8); });
+
+// ---------------- Leaderboard (localStorage) ----------------
+function loadLeaderboard(){ try{ const raw = localStorage.getItem('karsum_leaderboard'); return raw ? JSON.parse(raw) : []; }catch(e){ return []; } }
+function saveLeaderboard(list){ localStorage.setItem('karsum_leaderboard', JSON.stringify(list)); }
+function saveToLeaderboard(address, score){
+  const list = loadLeaderboard();
+  const existing = list.find(l=>l.address.toLowerCase()===address.toLowerCase());
+  if (existing){ if (score>existing.score) existing.score = score; }
+  else list.push({ address, score });
+  list.sort((a,b)=>b.score - a.score);
+  saveLeaderboard(list);
+}
+
+function renderLeaderboard(){
+  const list = loadLeaderboard();
+  const container = document.getElementById('boardList');
+  container.innerHTML='';
+  if (list.length===0){ container.innerHTML='<div class="small">No players yet</div>'; return; }
+  list.forEach((entry, idx)=>{
+    const div = document.createElement('div');
+    div.style.borderTop='1px solid rgba(255,255,255,0.04)';
+    div.style.padding='8px 0';
+    div.innerHTML = `<div style="display:flex; justify-content:space-between; align-items:center"><div><strong>#${idx+1}</strong> <span class="small">${shortAddr(entry.address)}</span><div class="small">Score: ${entry.score}</div></div><div style="display:flex; flex-direction:column; gap:6px"><button class="btn small" data-addr="${entry.address}" style="padding:6px 8px">Send Karsum</button></div></div>`;
+    container.appendChild(div);
+    div.querySelector('button').addEventListener('click', ()=>{ onClickSend(entry.address, entry.score); });
+  });
+}
+
+// ---------------- Solana: send SPL token to player's associated token account ----------------
+// Uses @solana/web3.js and @solana/spl-token
+
+async function findAssociatedTokenAddress(walletAddress, tokenMintAddress){
+  const walletPubkey = new solanaWeb3.PublicKey(walletAddress);
+  const mintPubkey = new solanaWeb3.PublicKey(tokenMintAddress);
+  return await splToken.getAssociatedTokenAddress(mintPubkey, walletPubkey);
+}
+
+async function onClickSend(toAddress, score){
+  if (!phantomConnected || !walletPubkey){ alert('Connect Phantom first (Connect Phantom button) using the developer wallet.'); return; }
+  const tokenMint = document.getElementById('tokenMint').value.trim();
+  const decimalsInput = document.getElementById('tokenDecimals').value.trim();
+  const perPoint = document.getElementById('tokensPerPoint').value.trim();
+  if (!tokenMint){ alert('Masukkan mint address Karsum (SPL) pada kotak input.'); return; }
+  if (!perPoint || Number(perPoint)<=0){ alert('Masukkan tokens per point yang valid.'); return; }
+  const decimals = decimalsInput ? Number(decimalsInput) : 9;
+
+  const amountTokens = Number(perPoint) * Number(score);
+  if (isNaN(amountTokens) || amountTokens <= 0){ alert('Jumlah token yang dihitung tidak valid'); return; }
+
+  // convert to integer amount in smallest unit (BigInt)
+  const multiplier = Math.pow(10, decimals);
+  const amountInteger = BigInt(Math.round(amountTokens * multiplier));
+
+  try{
+    const mintPubkey = new solanaWeb3.PublicKey(tokenMint);
+    const fromPubkey = walletPubkey; // developer's wallet (connected Phantom)
+    const toPubkey = new solanaWeb3.PublicKey(toAddress);
+
+    // get associated token accounts
+    const fromTokenAcc = await splToken.getAssociatedTokenAddress(mintPubkey, fromPubkey);
+    const toTokenAcc = await splToken.getAssociatedTokenAddress(mintPubkey, toPubkey);
+
+    // Build transaction: if recipient ATA doesn't exist, create it (createAssociatedTokenAccountInstruction)
+    const transaction = new solanaWeb3.Transaction();
+
+    const toAccInfo = await connection.getAccountInfo(toTokenAcc);
+    if (!toAccInfo){
+      // create associated account instruction
+      transaction.add(splToken.createAssociatedTokenAccountInstruction(fromPubkey, toTokenAcc, toPubkey, mintPubkey));
+    }
+
+    // transfer checked instruction (uses decimals)
+    transaction.add(splToken.createTransferCheckedInstruction(fromTokenAcc, mintPubkey, toTokenAcc, fromPubkey, amountInteger, decimals));
+
+    // set recent blockhash and fee payer
+    transaction.recentBlockhash = (await connection.getRecentBlockhash()).blockhash;
+    transaction.feePayer = fromPubkey;
+
+    // Request Phantom to sign & send transaction
+    const signed = await window.solana.signTransaction(transaction);
+    const rawTx = signed.serialize();
+    const txid = await connection.sendRawTransaction(rawTx);
+    alert('Transaksi dikirim: ' + txid + '\nMenunggu konfirmasi...');
+    await connection.confirmTransaction(txid, 'confirmed');
+    alert('Transaksi dikonfirmasi: ' + txid);
+  }catch(err){
+    console.error('send spl token err', err);
+    alert('Gagal mengirim token: ' + (err.message || err));
+  }
+}
+
+// ---------------- init ----------------
+(async ()=>{
+  await initSolana();
+  renderLeaderboard();
+  document.getElementById('connectBtn').addEventListener('click', async ()=>{
+    const ok = await connectPhantom();
+    if (!ok) alert('Gagal connect Phantom');
+    else renderLeaderboard();
+  });
+})();
+
+</script>
+</body>
+</html>
