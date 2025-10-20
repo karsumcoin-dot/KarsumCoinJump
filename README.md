@@ -1,2 +1,0 @@
-# KarsumCoinJump
-Game Karsum Coin
